@@ -1,0 +1,15 @@
+{
+    "name": "reddit-listener",
+    "version": "1.0.0",
+    "description": "Reddit monitoring bot that sends Slack alerts for healthcare-related discussions",
+    "main": "index.js",
+    "scripts": {
+      "test": "node test.js",
+      "zip": "zip -r function.zip index.js node_modules package.json"
+    },
+    "dependencies": {
+      "xml2js": "^0.6.2"
+    },
+    "author": "Alcott AI",
+    "license": "MIT"
+  }
