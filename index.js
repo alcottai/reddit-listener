@@ -79,7 +79,139 @@ const CONFIG = {
   }
 };
 
-// Fetch RSS feed from Reddit
+// ============================================================
+// Reply Drafter System Prompt (distilled from SKILL.md)
+// ============================================================
+
+const DRAFTER_SYSTEM_PROMPT = `You are Healthtech_Nerd on Reddit. You are a health tech nerd, NOT a clinician. You understand clinical workflows deeply but never impersonate medical staff.
+
+Your job: draft a Reddit reply to the thread provided. Follow these rules exactly.
+
+VOICE:
+- Warm, empathetic, conversational. First-person. Genuinely curious.
+- Use contractions (don't, isn't, won't, it's)
+- Mix of short and medium sentences. Paragraph breaks between thoughts.
+- Frame your knowledge as "I work in health tech" or "I nerd out in this space"
+
+STRUCTURE (make it feel natural, not formulaic):
+1. Empathize/validate (1-2 sentences) - acknowledge their situation. Lead with empathy or shared experience.
+2. Share knowledge/experience (2-5 sentences) - specific, practical, actionable. Reference details from their post.
+3. Ask a genuine follow-up question (1 sentence) - specific to something they mentioned.
+
+NEVER USE:
+- Em dashes (—) anywhere, ever. Use commas, periods, or parentheses instead.
+- "Great question!" / "Thanks for sharing!"
+- "I'd be happy to help" / "Feel free to reach out"
+- "Our product" / "Our solution" / "Our platform"
+- Emoji
+- "DM me"
+- Marketing language: "solution," "leverage," "empower," "streamline," "unlock," "game-changer," "revolutionary"
+- Bold text, headers, numbered lists, or other formatting. Just plain conversational text.
+
+TWO-TOUCH RULE:
+- The FIRST reply is ALWAYS pure value. Zero product mentions. No exceptions.
+- Also draft a FOLLOW-UP reply template that would only be posted if the OP engages back. This follow-up can casually mention Alcott if relevant.
+- If the thread doesn't warrant a product mention at all, skip the follow-up.
+
+PRODUCT CONTEXT (for follow-up only):
+Alcott: patient-facing visit prep, care coordination, patient engagement. $249/mo for up to 5 clinicians. Not a full EHR. When mentioning, be transparent about what it is and isn't. Casual close: "Let me know if you'd like to chat, happy to connect."
+
+OUTPUT FORMAT:
+Return a JSON object with this exact structure:
+{
+  "first_reply": "the Strategy A reply text (pure value, no product)",
+  "follow_up": "the Strategy B reply template (with casual product mention), or null if not applicable",
+  "strategy_note": "brief explanation of why you chose this approach"
+}
+
+Return ONLY the JSON object, no markdown fences, no extra text.`;
+
+// ============================================================
+// Claude API Integration
+// ============================================================
+
+async function draftReply(post) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+
+  const userMessage = `Draft a Reddit reply to this thread.
+
+Subreddit: r/${post.subreddit}
+Title: ${post.title}
+Content: ${stripHtml(post.content)}
+Matched Keywords: ${post.matchedKeywords.join(', ')}`;
+
+  const body = JSON.stringify({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 1024,
+    system: DRAFTER_SYSTEM_PROMPT,
+    messages: [{ role: 'user', content: userMessage }]
+  });
+
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'api.anthropic.com',
+      path: '/v1/messages',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'Content-Length': Buffer.byteLength(body)
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.content && parsed.content[0]) {
+            const text = parsed.content[0].text;
+            // Parse the JSON response from Claude
+            const draft = JSON.parse(text);
+            resolve(draft);
+          } else {
+            console.error('Unexpected Claude response:', data);
+            resolve(null);
+          }
+        } catch (e) {
+          console.error('Failed to parse Claude response:', e.message);
+          resolve(null);
+        }
+      });
+    });
+
+    req.on('error', (e) => {
+      console.error('Claude API error:', e.message);
+      resolve(null); // Don't break the Lambda on draft failure
+    });
+
+    req.write(body);
+    req.end();
+  });
+}
+
+// Strip HTML tags from RSS content
+function stripHtml(html) {
+  if (!html) return '';
+  return html
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+    .substring(0, 2000); // Cap length for API call
+}
+
+// ============================================================
+// RSS Feed Monitoring
+// ============================================================
+
 async function fetchRSS(subreddit) {
   return new Promise((resolve, reject) => {
     const url = `https://www.reddit.com/r/${subreddit}/new/.rss`;
@@ -92,7 +224,6 @@ async function fetchRSS(subreddit) {
     https.get(url, options, (res) => {
       let data = '';
 
-      // Handle redirects
       if (res.statusCode === 301 || res.statusCode === 302) {
         https.get(res.headers.location, options, (redirectRes) => {
           redirectRes.on('data', chunk => data += chunk);
@@ -112,7 +243,6 @@ async function fetchRSS(subreddit) {
   });
 }
 
-// Parse RSS XML to posts
 async function parseRSS(xml) {
   return new Promise((resolve, reject) => {
     parseString(xml, (err, result) => {
@@ -138,13 +268,15 @@ async function parseRSS(xml) {
   });
 }
 
-// Check if post matches keywords
 function matchesKeywords(post, keywords) {
   const text = `${post.title} ${post.content}`.toLowerCase();
   return keywords.filter(keyword => text.includes(keyword.toLowerCase()));
 }
 
-// Send Slack notification
+// ============================================================
+// Slack Notifications
+// ============================================================
+
 async function sendSlackNotification(webhookUrl, message) {
   return new Promise((resolve, reject) => {
     const url = new URL(webhookUrl);
@@ -178,7 +310,7 @@ async function sendSlackNotification(webhookUrl, message) {
   });
 }
 
-// Format Slack message
+// Format Slack message with draft replies included
 function formatSlackMessage(productName, matches) {
   if (matches.length === 0) {
     return null;
@@ -193,16 +325,15 @@ function formatSlackMessage(productName, matches) {
         emoji: true
       }
     },
-    {
-      type: 'divider'
-    }
+    { type: 'divider' }
   ];
 
-  // Limit to top 20 matches
-  const topMatches = matches.slice(0, 20);
+  const topMatches = matches.slice(0, 10); // Reduced from 20 since drafts take more space
 
   for (const match of topMatches) {
     const keywordList = match.matchedKeywords.slice(0, 3).join(', ');
+
+    // Thread info
     blocks.push({
       type: 'section',
       text: {
@@ -210,38 +341,73 @@ function formatSlackMessage(productName, matches) {
         text: `*r/${match.subreddit}*\n<${match.link}|${truncate(match.title, 100)}>\n_Keywords: ${keywordList}_`
       }
     });
+
+    // Draft reply (if available)
+    if (match.draft) {
+      blocks.push({
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: `📝 _${match.draft.strategy_note}_`
+        }]
+      });
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*Draft reply:*\n${truncate(match.draft.first_reply, 500)}`
+        }
+      });
+
+      if (match.draft.follow_up) {
+        blocks.push({
+          type: 'context',
+          elements: [{
+            type: 'mrkdwn',
+            text: `💬 *Follow-up (if they reply):* ${truncate(match.draft.follow_up, 300)}`
+          }]
+        });
+      }
+
+      blocks.push({ type: 'divider' });
+    }
   }
 
-  if (matches.length > 20) {
+  if (matches.length > 10) {
     blocks.push({
       type: 'context',
-      elements: [
-        {
-          type: 'mrkdwn',
-          text: `_...and ${matches.length - 20} more matches_`
-        }
-      ]
+      elements: [{
+        type: 'mrkdwn',
+        text: `_...and ${matches.length - 10} more matches (drafts generated for top 10 only)_`
+      }]
     });
   }
 
   return { blocks };
 }
 
-// Truncate text
+// ============================================================
+// Helpers
+// ============================================================
+
 function truncate(text, maxLength) {
+  if (!text) return '';
   if (text.length <= maxLength) return text;
   return text.substring(0, maxLength - 3) + '...';
 }
 
-// Get hours ago timestamp
 function getHoursAgo(hours) {
   return new Date(Date.now() - hours * 60 * 60 * 1000);
 }
 
-// Main handler
+// ============================================================
+// Main Handler
+// ============================================================
+
 exports.handler = async (event) => {
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
   const hoursBack = parseInt(process.env.HOURS_BACK || '24', 10);
+  const draftsEnabled = !!process.env.ANTHROPIC_API_KEY;
 
   if (!webhookUrl) {
     throw new Error('SLACK_WEBHOOK_URL environment variable not set');
@@ -250,7 +416,8 @@ exports.handler = async (event) => {
   const cutoffTime = getHoursAgo(hoursBack);
   const allMatches = { alcott: [] };
 
-  // Process each product
+  // ---- Step 1: Scan subreddits for matching threads ----
+
   for (const [productKey, config] of Object.entries(CONFIG)) {
     console.log(`Processing ${config.name}...`);
 
@@ -260,7 +427,6 @@ exports.handler = async (event) => {
         const xml = await fetchRSS(subreddit);
         const posts = await parseRSS(xml);
 
-        // Filter by time and keywords
         for (const post of posts) {
           const postTime = new Date(post.published);
           if (postTime < cutoffTime) continue;
@@ -275,7 +441,6 @@ exports.handler = async (event) => {
           }
         }
 
-        // Rate limiting: wait 1 second between requests
         await new Promise(resolve => setTimeout(resolve, 1000));
 
       } catch (error) {
@@ -284,7 +449,33 @@ exports.handler = async (event) => {
     }
   }
 
-  // Send Slack notifications
+  // ---- Step 2: Generate draft replies for top matches ----
+
+  if (draftsEnabled) {
+    for (const [productKey, matches] of Object.entries(allMatches)) {
+      // Draft replies for top 10 matches to manage API costs
+      const toDraft = matches.slice(0, 10);
+      console.log(`Drafting replies for ${toDraft.length} matches...`);
+
+      for (const match of toDraft) {
+        try {
+          console.log(`  Drafting reply for: ${truncate(match.title, 50)}`);
+          match.draft = await draftReply(match);
+
+          // Brief pause between API calls
+          await new Promise(resolve => setTimeout(resolve, 500));
+        } catch (error) {
+          console.error(`  Error drafting reply:`, error.message);
+          match.draft = null;
+        }
+      }
+    }
+  } else {
+    console.log('ANTHROPIC_API_KEY not set, skipping draft generation');
+  }
+
+  // ---- Step 3: Send Slack notifications ----
+
   const today = new Date().toLocaleDateString('en-US', {
     weekday: 'long',
     year: 'numeric',
@@ -307,7 +498,6 @@ exports.handler = async (event) => {
     }
   }
 
-  // Send summary if no matches at all
   if (totalMatches === 0) {
     await sendSlackNotification(webhookUrl, {
       text: `🔍 Reddit Scan Complete — ${today}\n\nNo matching posts found in the last ${hoursBack} hours.`
@@ -318,7 +508,8 @@ exports.handler = async (event) => {
     statusCode: 200,
     body: JSON.stringify({
       message: 'Scan complete',
-      alcottMatches: allMatches.alcott.length
+      alcottMatches: allMatches.alcott.length,
+      draftsGenerated: draftsEnabled ? allMatches.alcott.filter(m => m.draft).length : 0
     })
   };
 };
