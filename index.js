@@ -8,7 +8,7 @@ const CONFIG = {
     subreddits: [
       // Patient communities
       'ChronicIllness',
-      'ADHD', 
+      'ADHD',
       'HealthAnxiety',
       'Caregivers',
       'Autoimmune',
@@ -69,65 +69,12 @@ const CONFIG = {
       'patient engagement',
       'community health',
       'population health',
-      // Patient-side forms frustration (leads to Medipen awareness)
+      // Patient-side forms frustration
       'doctor won\'t fill out',
       'doctor refused to fill',
       'getting doctor to fill',
       'need forms filled out',
       'doctor to sign forms'
-    ]
-  },
-  medipen: {
-    name: 'MEDIPEN',
-    subreddits: [
-      // Provider communities only
-      'medicine',
-      'familymedicine',
-      'nursepractitioner',
-      'residency',
-      'Doctorsofreddit',
-      'familydocs',
-      'FemalePhysicians',
-      'HealthcareAdmins',
-      'healthIT',
-      'medicalschool',
-      'PrimaryCare',
-      'Orthopedics',
-      // Behavioral health
-      'therapists',
-      'socialwork',
-      'psychiatry',
-      'counseling',
-      // Health system
-      'healthcare',
-      'healthcareworkers',
-      'publichealth'
-    ],
-    keywords: [
-      // Provider-side forms pain
-      'disability forms',
-      'disability paperwork',
-      'disability evaluation',
-      'FMLA paperwork',
-      'FMLA forms',
-      'filling out forms',
-      'hate filling out',
-      'workers comp forms',
-      'workers compensation',
-      'short term disability',
-      'long term disability',
-      'leave paperwork',
-      'medical leave forms',
-      'functional capacity',
-      'work restrictions',
-      'return to work forms',
-      'filling out disability',
-      'UNUM',
-      'employer forms',
-      'insurance disability',
-      'so much paperwork',
-      'drowning in paperwork',
-      'administrative burden'
     ]
   }
 };
@@ -136,16 +83,15 @@ const CONFIG = {
 async function fetchRSS(subreddit) {
   return new Promise((resolve, reject) => {
     const url = `https://www.reddit.com/r/${subreddit}/new/.rss`;
-    
     const options = {
       headers: {
         'User-Agent': 'aws-lambda:alcott-listener:1.0 (by /u/healthtechnerd)'
       }
     };
-    
+
     https.get(url, options, (res) => {
       let data = '';
-      
+
       // Handle redirects
       if (res.statusCode === 301 || res.statusCode === 302) {
         https.get(res.headers.location, options, (redirectRes) => {
@@ -154,12 +100,12 @@ async function fetchRSS(subreddit) {
         }).on('error', reject);
         return;
       }
-      
+
       if (res.statusCode !== 200) {
         reject(new Error(`Failed to fetch r/${subreddit}: ${res.statusCode}`));
         return;
       }
-      
+
       res.on('data', chunk => data += chunk);
       res.on('end', () => resolve(data));
     }).on('error', reject);
@@ -174,7 +120,6 @@ async function parseRSS(xml) {
         reject(err);
         return;
       }
-      
       try {
         const entries = result.feed?.entry || [];
         const posts = entries.map(entry => ({
@@ -203,9 +148,8 @@ function matchesKeywords(post, keywords) {
 async function sendSlackNotification(webhookUrl, message) {
   return new Promise((resolve, reject) => {
     const url = new URL(webhookUrl);
-    
     const payload = JSON.stringify(message);
-    
+
     const options = {
       hostname: url.hostname,
       path: url.pathname,
@@ -215,7 +159,7 @@ async function sendSlackNotification(webhookUrl, message) {
         'Content-Length': Buffer.byteLength(payload)
       }
     };
-    
+
     const req = https.request(options, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
@@ -227,7 +171,7 @@ async function sendSlackNotification(webhookUrl, message) {
         }
       });
     });
-    
+
     req.on('error', reject);
     req.write(payload);
     req.end();
@@ -239,7 +183,7 @@ function formatSlackMessage(productName, matches) {
   if (matches.length === 0) {
     return null;
   }
-  
+
   const blocks = [
     {
       type: 'header',
@@ -253,13 +197,12 @@ function formatSlackMessage(productName, matches) {
       type: 'divider'
     }
   ];
-  
+
   // Limit to top 20 matches
   const topMatches = matches.slice(0, 20);
-  
+
   for (const match of topMatches) {
     const keywordList = match.matchedKeywords.slice(0, 3).join(', ');
-    
     blocks.push({
       type: 'section',
       text: {
@@ -268,7 +211,7 @@ function formatSlackMessage(productName, matches) {
       }
     });
   }
-  
+
   if (matches.length > 20) {
     blocks.push({
       type: 'context',
@@ -280,7 +223,7 @@ function formatSlackMessage(productName, matches) {
       ]
     });
   }
-  
+
   return { blocks };
 }
 
@@ -299,29 +242,29 @@ function getHoursAgo(hours) {
 exports.handler = async (event) => {
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
   const hoursBack = parseInt(process.env.HOURS_BACK || '24', 10);
-  
+
   if (!webhookUrl) {
     throw new Error('SLACK_WEBHOOK_URL environment variable not set');
   }
-  
+
   const cutoffTime = getHoursAgo(hoursBack);
-  const allMatches = { alcott: [], medipen: [] };
-  
+  const allMatches = { alcott: [] };
+
   // Process each product
   for (const [productKey, config] of Object.entries(CONFIG)) {
     console.log(`Processing ${config.name}...`);
-    
+
     for (const subreddit of config.subreddits) {
       try {
         console.log(`  Fetching r/${subreddit}...`);
         const xml = await fetchRSS(subreddit);
         const posts = await parseRSS(xml);
-        
+
         // Filter by time and keywords
         for (const post of posts) {
           const postTime = new Date(post.published);
           if (postTime < cutoffTime) continue;
-          
+
           const matchedKeywords = matchesKeywords(post, config.keywords);
           if (matchedKeywords.length > 0) {
             allMatches[productKey].push({
@@ -331,30 +274,30 @@ exports.handler = async (event) => {
             });
           }
         }
-        
+
         // Rate limiting: wait 1 second between requests
         await new Promise(resolve => setTimeout(resolve, 1000));
-        
+
       } catch (error) {
         console.error(`  Error fetching r/${subreddit}:`, error.message);
       }
     }
   }
-  
+
   // Send Slack notifications
-  const today = new Date().toLocaleDateString('en-US', { 
-    weekday: 'long', 
-    year: 'numeric', 
-    month: 'long', 
-    day: 'numeric' 
+  const today = new Date().toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric'
   });
-  
+
   let totalMatches = 0;
-  
+
   for (const [productKey, matches] of Object.entries(allMatches)) {
     const config = CONFIG[productKey];
     const message = formatSlackMessage(config.name, matches);
-    
+
     if (message) {
       await sendSlackNotification(webhookUrl, message);
       totalMatches += matches.length;
@@ -363,20 +306,19 @@ exports.handler = async (event) => {
       console.log(`No matches for ${config.name}`);
     }
   }
-  
+
   // Send summary if no matches at all
   if (totalMatches === 0) {
     await sendSlackNotification(webhookUrl, {
       text: `🔍 Reddit Scan Complete — ${today}\n\nNo matching posts found in the last ${hoursBack} hours.`
     });
   }
-  
+
   return {
     statusCode: 200,
     body: JSON.stringify({
       message: 'Scan complete',
-      alcottMatches: allMatches.alcott.length,
-      medipenMatches: allMatches.medipen.length
+      alcottMatches: allMatches.alcott.length
     })
   };
 };
